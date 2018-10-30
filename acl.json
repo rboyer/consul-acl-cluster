@@ -1,0 +1,10 @@
+{
+   "primary_datacenter" : "primary",
+
+   "acl" : {
+      "enabled" : true,
+      "enable_token_replication" : true,
+      "default_policy" : "deny",
+      "down_policy" : "async-cache"
+   }
+}
