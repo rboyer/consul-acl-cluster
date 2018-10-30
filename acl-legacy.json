@@ -1,5 +1,0 @@
-{
-   "acl_datacenter" : "primary",
-   "acl_default_policy" : "deny",
-   "acl_down_policy": "async-cache"
-}
