@@ -3,7 +3,7 @@ variable "legacy_image" {
 }
 
 variable "acl_image" {
-  default = "consul-dev"
+  default = "consul-dev:latest"
 }
 
 variable "legacy_config" {

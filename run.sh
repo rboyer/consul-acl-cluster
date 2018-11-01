@@ -56,6 +56,7 @@ mkdir -p tmp config-old config-new
 
 MASTER_TOKEN=""
 AGENT_TOKEN=""
+AGENT_POLICY=""
 REPL_TOKEN=""
 
 die() {
@@ -72,7 +73,7 @@ fixperms() {
 }
 
 do_destroy() {
-	terraform destroy -auto-approve
+    terraform destroy -auto-approve
     rm -f tmp/*
     rm -f tmp/.*.booted tmp/.*.upgraded
 
@@ -167,6 +168,7 @@ genconfig_host() {
     # main ACL configs
     cat > "${old_dir}/acl.json" <<EOF
 {
+   "log_level":"debug",
    "acl_datacenter" : "primary",
    "acl_default_policy" : "deny",
    "acl_down_policy": "async-cache"
@@ -174,6 +176,7 @@ genconfig_host() {
 EOF
     cat > "${new_dir}/acl.json" <<EOF
 {
+  "log_level":"debug",
   "primary_datacenter": "primary",
   "acl": {
     "enabled": true,
@@ -268,59 +271,125 @@ build() {
 }
 
 check_token() {
+    check_idfile "$1" token
+}
+check_idfile() {
     local name="$1"
-    local fn="tmp/${name}_token.json"
+    local type="$2"
+
+    local fn="tmp/${name}_${type}.json"
     if [[ ! -f "$fn" ]]; then
-        die "missing ${name} token file: ${fn}"
+        die "missing ${name} ${type} file: ${fn}"
     fi
     if [[ ! -s "$fn" ]]; then
         rm -f "${fn}"
-        die "empty ${name} token file (now erased): ${fn}"
+        die "empty ${name} ${type} file (now erased): ${fn}"
     fi
-	if ! < "$fn" jq .ID >/dev/null 2>&1 ; then
-        die "bad ${name} token file: ${fn}"
-	fi
+    if ! < "$fn" jq '.ID, .SecretID' >/dev/null 2>&1 ; then
+        die "bad ${name} ${type} file: ${fn}"
+    fi
+}
+load_idfile() {
+    local name="$1"
+    local type="$2"
+    if [[ "${1:-}" != "check" ]]; then
+        check_idfile "$name" "$type"
+    fi
+
+    local fn="tmp/${name}_${type}.json"
+
+    local token=""
+    if [[ -n "$USE_SECRETS" ]]; then
+        token="$(jq -r .SecretID < "$fn")"
+    fi
+    if [[ -z "$token" ]]; then
+        token="$(jq -r .ID < "$fn")"
+    fi
+    echo "$token"
 }
 
 aclboot_master_old() {
     mkdir -p tmp
-	if [[ ! -f tmp/master_token.json ]]; then
+    if [[ ! -f tmp/master_token.json ]]; then
         echo "Bootstrapping ACLs..."
-	    curl -sL -XPUT http://localhost:8501/v1/acl/bootstrap > tmp/master_token.json
+        curl -sL -XPUT http://localhost:8501/v1/acl/bootstrap > tmp/master_token.json
         echo "...done"
-	fi
+    fi
     load_master_token
 }
 load_master_token() {
-    if [[ "${1:-}" != "check" ]]; then
-        check_token master
-    fi
-
     local token
-	token="$(jq -r .ID < tmp/master_token.json)"
+    token="$(load_idfile master token)"
     if [[ "${MASTER_TOKEN}" != "${token}" ]]; then
         MASTER_TOKEN="${token}"
         echo "Master Token is ${MASTER_TOKEN}"
     fi
 }
+aclboot_agent() {
+    if [[ -n "$PRIMARY_NEW" ]]; then
+        aclboot_agent_new
+    else
+        aclboot_agent_old
+    fi
+}
 aclboot_agent_old() {
     load_master_token
 
-	mkdir -p tmp
-	if [[ ! -f tmp/agent_token.json ]]; then
-	    curl -sL -XPUT http://localhost:8501/v1/acl/create \
-	        -H "X-Consul-Token: ${MASTER_TOKEN}" \
-	        -d '{
+    mkdir -p tmp
+    if [[ ! -f tmp/agent_token.json ]]; then
+        curl -sL -XPUT http://localhost:8501/v1/acl/create \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d '{
   "Name": "Agent Token",
   "Type": "client",
   "Rules": "agent \"\" { policy = \"write\" } node \"\" { policy = \"write\" } service \"\" { policy = \"read\" }"
 }' > tmp/agent_token.json
-	fi
+    fi
     load_agent_token
 
     # now install
     mkdir -p tmp
-	if [[ -f tmp/.agents.booted ]]; then
+    if [[ -f tmp/.agents.booted ]]; then
+        return
+    fi
+    genconfig
+    restart
+    touch tmp/.agents.booted
+}
+aclboot_agent_new() {
+    load_master_token
+
+    mkdir -p tmp
+
+    # double guard so we can avoid creating a policy we won't use if we
+    # start in OLD and then upgrade to NEW
+    if [[ ! -f tmp/agent_token.json ]]; then
+        # first make the policy
+        if [[ ! -f tmp/agent_policy.json ]]; then
+            curl -sL -XPUT 'http://localhost:8501/v1/acl/policy' \
+                -H "X-Consul-Token: ${MASTER_TOKEN}" \
+                -d '{
+  "Name" : "agent-default",
+  "Description" : "Can register any node and read any service",
+  "Rules": "agent_prefix \"\" { policy = \"write\" } node_prefix \"\" { policy = \"write\" } service_prefix \"\" { policy = \"read\" }"
+}' > tmp/agent_policy.json
+        fi
+        load_agent_policy
+
+        # now make the token
+            curl -sL -XPUT http://localhost:8501/v1/acl/token \
+                -H "X-Consul-Token: ${MASTER_TOKEN}" \
+                -d "{
+  \"Name\": \"Agent Token\",
+  \"Description\": \"Agent Token\",
+  \"Policies\" : [ { \"ID\" : \"${AGENT_POLICY}\" } ]
+}" > tmp/agent_token.json
+    fi
+    load_agent_token
+
+    # now install
+    mkdir -p tmp
+    if [[ -f tmp/.agents.booted ]]; then
         return
     fi
     genconfig
@@ -328,15 +397,23 @@ aclboot_agent_old() {
     touch tmp/.agents.booted
 }
 load_agent_token() {
-    if [[ "${1:-}" != "check" ]]; then
-        check_token agent
-    fi
-
     local token
-	token="$(jq -r .ID < tmp/agent_token.json)"
+    token="$(load_idfile agent token)"
     if [[ "${AGENT_TOKEN}" != "${token}" ]]; then
         AGENT_TOKEN="${token}"
         echo "Agent Token is ${AGENT_TOKEN}"
+    fi
+}
+load_agent_policy() {
+    if [[ "${1:-}" != "check" ]]; then
+        check_idfile agent policy
+    fi
+
+    local policy
+    policy="$(jq -r .ID < tmp/agent_policy.json)"
+    if [[ "${AGENT_POLICY}" != "${policy}" ]]; then
+        AGENT_POLICY="${policy}"
+        echo "Agent Policy is ${AGENT_POLICY}"
     fi
 }
 
@@ -344,7 +421,7 @@ aclboot_anon_old() {
     load_master_token
 
     mkdir -p tmp
-	if [[ -f tmp/.anon.booted ]]; then
+    if [[ -f tmp/.anon.booted ]]; then
         return
     fi
 
@@ -367,20 +444,20 @@ aclboot_repl_old() {
     # token replication is enabled then it must have "write" permissions.
 
 
-	mkdir -p tmp
-	if [[ ! -f tmp/repl_token.json ]]; then
-	    curl -sL -XPUT http://localhost:8501/v1/acl/create \
-	        -H "X-Consul-Token: ${MASTER_TOKEN}" \
-	        -d '{
+    mkdir -p tmp
+    if [[ ! -f tmp/repl_token.json ]]; then
+        curl -sL -XPUT http://localhost:8501/v1/acl/create \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d '{
   "Name": "Repl Token",
   "Type": "management"
 }' > tmp/repl_token.json
-	fi
+    fi
     load_repl_token
 
     # now install
     mkdir -p tmp
-	if [[ -f tmp/.repl.booted ]]; then
+    if [[ -f tmp/.repl.booted ]]; then
         return
     fi
     genconfig
@@ -388,12 +465,8 @@ aclboot_repl_old() {
     touch tmp/.repl.booted
 }
 load_repl_token() {
-    if [[ "${1:-}" != "check" ]]; then
-        check_token repl
-    fi
-
     local token
-	token="$(jq -r .ID < tmp/repl_token.json)"
+    token="$(load_idfile repl token)"
     if [[ "${REPL_TOKEN}" != "${token}" ]]; then
         REPL_TOKEN="${token}"
         echo "Replication Token is ${REPL_TOKEN}"
@@ -422,7 +495,7 @@ do_refresh() {
     # exit 0
 
     aclboot_master_old
-    aclboot_agent_old
+    aclboot_agent
     aclboot_anon_old
     aclboot_repl_old
     stat
@@ -515,7 +588,7 @@ do_sanity() {
             "Type": "client",
             "Rules": "{\"key\":{\"stuff\":{\"Policy\":\"write\"}}}"
         }' > tmp/testkv_token.json
-	local token
+    local token
     token="$(jq -r .ID < tmp/testkv_token.json)"
     echo "Test token is $token"
 
@@ -577,6 +650,10 @@ SECONDARY_NEW=""
 if [[ -f "tmp/.secondary.upgraded" ]]; then
     SECONDARY_NEW=1
 fi
+USE_SECRETS=""
+if [[ -f "tmp/.ids.upgraded" ]]; then
+    USE_SECRETS=1
+fi
 
 show_usage() {
     cat <<EOF
@@ -598,6 +675,7 @@ upgrade-primary     - upgrade all primary DC members to 1.4.0
 upgrade-primary-one - upgrade just consul-primary-srv1 to 1.4.0
 flag-upgraded       - drop sufficient marker files such that a call to
                       'refresh' will initialize to 1.4.0 (skipping 1.3.0)
+use-secrets         - will switch to using SecretID if found
 
 TESTING
 
@@ -660,6 +738,11 @@ case "${mode}" in
         ;;
     start-primary)
         docker start consul-primary-srv{1,2,3}
+        ;;
+    use-secrets)
+        touch tmp/.ids.upgraded
+        USE_SECRETS=1
+        build
         ;;
     testtoken)
         echo "Creating key for use in testing KV under stuff/..."
