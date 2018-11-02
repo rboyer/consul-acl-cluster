@@ -58,6 +58,8 @@ MASTER_TOKEN=""
 AGENT_TOKEN=""
 AGENT_POLICY=""
 REPL_TOKEN=""
+VAULT_STORE_TOKEN=""
+VAULT_SECRET_TOKEN=""
 
 declare -A UPGRADED_HOSTS
 
@@ -512,6 +514,48 @@ check_repl() {
     done
 }
 
+aclboot_vault_old() {
+    load_master_token
+
+    mkdir -p tmp
+
+    if [[ ! -f tmp/vaultsecret_token.json ]]; then
+        curl -sL -XPUT http://localhost:8501/v1/acl/create \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d '{
+  "Name": "Vault Secret Token",
+  "Type": "management"
+}' > tmp/vaultsecret_token.json
+    fi
+
+    if [[ ! -f tmp/vaultstore_token.json ]]; then
+        local write='{ policy = \"write\" }'
+        curl -sL -XPUT http://localhost:8501/v1/acl/create \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d '{
+  "Name": "Vault Storage Token",
+  "Type": "client",
+  "Rules": "key \"vault/\" { policy = \"write\" } node \"\" { policy = \"write\" } service \"vault\" { policy = \"write\" } agent \"\" { policy = \"write\" } session \"\" { policy = \"write\" }"
+}' > tmp/vaultstore_token.json
+    fi
+
+    load_vault_tokens
+}
+load_vault_tokens() {
+    local token
+    token="$(load_idfile vaultsecret token)"
+    if [[ "${VAULT_SECRET_TOKEN}" != "${token}" ]]; then
+        VAULT_SECRET_TOKEN="${token}"
+        echo "Vault Secret Token is ${VAULT_SECRET_TOKEN}"
+    fi
+
+    token="$(load_idfile vaultstore token)"
+    if [[ "${VAULT_STORE_TOKEN}" != "${token}" ]]; then
+        VAULT_STORE_TOKEN="${token}"
+        echo "Vault Store Token is ${VAULT_STORE_TOKEN}"
+    fi
+}
+
 do_refresh() {
     # set -x
     # genconfig
@@ -523,6 +567,7 @@ do_refresh() {
     aclboot_agent
     aclboot_anon_old
     aclboot_repl_old
+    aclboot_vault_old
     stat
 }
 
@@ -613,8 +658,9 @@ do_sanity() {
         -d '{
             "Name": "test key for stuff",
             "Type": "client",
-            "Rules": "{\"key\":{\"stuff\":{\"Policy\":\"write\"}}}"
+            "Rules": "key \"stuff\" { policy = \"write\" }"
         }' > tmp/testkv_token.json
+            # "Rules": "{\"key\":{\"stuff\":{\"Policy\":\"write\"}}}"
     local token
     token="$(jq -r .ID < tmp/testkv_token.json)"
     echo "Test token is $token"
