@@ -59,6 +59,8 @@ AGENT_TOKEN=""
 AGENT_POLICY=""
 REPL_TOKEN=""
 
+declare -A UPGRADED_HOSTS
+
 die() {
     echo "ERROR: $1" >&2
     exit 1
@@ -70,6 +72,34 @@ fixperms() {
     fi
     # ugh the official docker image rechowns the config dir...
     sudo chown -R $(id -u):$(id -g) "$@"
+}
+
+load_upgraded() {
+    if [[ ! -f tmp/list.upgraded ]]; then
+        UPGRADED_HOSTS=()
+        return
+    fi
+    local hosts
+    readarray -t hosts < <(sort tmp/list.upgraded)
+
+    UPGRADED_HOSTS=()
+    for h in "${hosts[@]}"; do
+        UPGRADED_HOSTS[$h]=1
+    done
+}
+write_upgraded() {
+    mkdir -p tmp
+
+    if [[ "${#UPGRADED_HOSTS[@]}" -lt 1 ]]; then
+        rm -f tmp/list.upgraded
+        return
+    fi
+
+    rm -f tmp/list.upgraded.tmp
+    for host in "${!UPGRADED_HOSTS[@]}"; do
+        echo "${host}" >> tmp/list.upgraded.tmp
+    done
+    mv -f tmp/list.upgraded.tmp tmp/list.upgraded
 }
 
 do_destroy() {
@@ -230,50 +260,37 @@ EOF
     fi
 }
 
+tobool() {
+    if [[ -n "${1:-}" ]]; then
+        echo true
+    else
+        echo false
+    fi
+}
+to_inv_bool() {
+    if [[ -z "${1:-}" ]]; then
+        echo true
+    else
+        echo false
+    fi
+}
+
+
 build() {
     genconfig
 
-    local pri
-    local sec
-    if [[ -n "$PRIMARY_NEW" ]]; then
-        pri=false
-    else
-        pri=true
-    fi
-    if [[ -n "$SECONDARY_NEW" ]]; then
-        sec=false
-    else
-        sec=true
-    fi
-
-    pri_svr1_leg=$pri
-    pri_ui_leg=$pri
-    if [[ -n "${UPGRADE_ONLY:-}" ]]; then
-        case "$UPGRADE_ONLY" in
-            consul-primary-svr1)
-                pri_svr1_leg=false
-                ;;
-            consul-primary-ui)
-                pri_ui_leg=false
-                ;;
-            *)
-                die "unexpected value: UPGRADE_ONLY=$UPGRADE_ONLY"
-                ;;
-        esac
-    fi
-
     terraform apply -auto-approve \
-        -var primary_srv1_legacy=$pri_svr1_leg \
-        -var primary_srv2_legacy=$pri \
-        -var primary_srv3_legacy=$pri \
-        -var primary_ui_legacy=$pri_ui_leg \
+        -var primary_srv1_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-primary-srv1]:-}) \
+        -var primary_srv2_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-primary-srv2]:-}) \
+        -var primary_srv3_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-primary-srv3]:-}) \
+        -var primary_ui_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-primary-ui]:-}) \
         -var enable_secondary=true \
-        -var secondary_srv1_legacy=$sec \
-        -var secondary_srv2_legacy=$sec \
-        -var secondary_srv3_legacy=$sec \
-        -var secondary_ui_legacy=$sec \
-        -var secondary_client1_legacy=$sec \
-        -var secondary_client2_legacy=$sec
+        -var secondary_srv1_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-srv1]:-}) \
+        -var secondary_srv2_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-srv2]:-}) \
+        -var secondary_srv3_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-srv3]:-}) \
+        -var secondary_ui_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-ui]:-}) \
+        -var secondary_client1_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-client1]:-}) \
+        -var secondary_client2_legacy=$(to_inv_bool ${UPGRADED_HOSTS[consul-secondary-client2]:-})
 
     wait_all
 }
@@ -334,7 +351,7 @@ load_master_token() {
     fi
 }
 aclboot_agent() {
-    if [[ -n "$PRIMARY_NEW" ]]; then
+    if [[ -n "$USE_NEW_AGENTAPI" ]]; then
         aclboot_agent_new
     else
         aclboot_agent_old
@@ -649,18 +666,15 @@ consul_cmd() {
         consul "$@"
 }
 
-PRIMARY_NEW=""
-if [[ -f "tmp/.primary.upgraded" ]]; then
-    PRIMARY_NEW=1
-fi
+load_upgraded
 
-SECONDARY_NEW=""
-if [[ -f "tmp/.secondary.upgraded" ]]; then
-    SECONDARY_NEW=1
-fi
 USE_SECRETS=""
 if [[ -f "tmp/.ids.upgraded" ]]; then
     USE_SECRETS=1
+fi
+USE_NEW_AGENTAPI=""
+if [[ -f "tmp/.agentapi.upgraded" ]]; then
+    USE_NEW_AGENTAPI=1
 fi
 
 show_usage() {
@@ -678,12 +692,14 @@ help     - show this
 
 UPGRADES
 
+upgrade-<CONTAINER> - upgrade just the container named <CONTAINER>
 upgrade-secondary   - upgrade all secondary DC members to 1.4.0
 upgrade-primary     - upgrade all primary DC members to 1.4.0
 upgrade-primary-one - upgrade just consul-primary-srv1 to 1.4.0
 upgrade-primary-ui  - upgrade just consul-primary-ui to 1.4.0
 flag-upgraded       - drop sufficient marker files such that a call to
                       'refresh' will initialize to 1.4.0 (skipping 1.3.0)
+flag-agentapi2      - switch to using the ACL v2 Agent API
 use-secrets         - will switch to using SecretID if found
 
 TESTING
@@ -703,7 +719,6 @@ case "${mode}" in
         show_usage
         ;;
     destroy)
-        echo "Destroying everything..."
         do_destroy
         ;;
     refresh)
@@ -713,25 +728,54 @@ case "${mode}" in
         genconfig
         ;;
     flag-upgraded)
-        touch tmp/.primary.upgraded
-        touch tmp/.secondary.upgraded
+        for host in "${all_sorted[@]}"; do
+            UPGRADED_HOSTS[$host]=1
+        done
+        write_upgraded
         ;;
     upgrade-secondary)
-        touch tmp/.secondary.upgraded
-        SECONDARY_NEW=1
-        build
-        ;;
-    upgrade-primary-ui)
-        UPGRADE_ONLY=consul-primary-ui
-        build
-        ;;
-    upgrade-primary-one)
-        UPGRADE_ONLY=consul-primary-svr1
+        for host in "${sec_sorted[@]}"; do
+            UPGRADED_HOSTS[$host]=1
+        done
+        write_upgraded
         build
         ;;
     upgrade-primary)
-        touch tmp/.primary.upgraded
-        PRIMARY_NEW=1
+        for host in "${pri_sorted[@]}"; do
+            UPGRADED_HOSTS[$host]=1
+        done
+        write_upgraded
+        build
+        ;;
+    upgrade-primary-ui)
+        UPGRADED_HOSTS[consul-primary-ui]=1
+        write_upgraded
+        build
+        ;;
+    upgrade-primary-one)
+        UPGRADED_HOSTS[consul-primary-srv1]=1
+        write_upgraded
+        build
+        ;;
+    upgrade-*)
+        host="${mode/#upgrade-/}"
+        if [[ -z "$host" ]]; then
+            die "expected format upgrade-<hostname>"
+        fi
+
+        valid=""
+        for testhost in "${all_sorted[@]}"; do
+            if [[ "$testhost" = "$host" ]]; then
+                valid=1
+                break
+            fi
+        done
+        if [[ -z "$valid" ]]; then
+            die "invalid host: $host"
+        fi
+
+        UPGRADED_HOSTS[$host]=1
+        write_upgraded
         build
         ;;
     status|stat|st)
@@ -756,6 +800,10 @@ case "${mode}" in
         touch tmp/.ids.upgraded
         USE_SECRETS=1
         build
+        ;;
+    flag-agentapi2)
+        touch tmp/.agentapi.upgraded
+        USE_NEW_AGENTAPI=1
         ;;
     testtoken)
         echo "Creating key for use in testing KV under stuff/..."

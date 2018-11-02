@@ -5,3 +5,6 @@ all:
 
 %:
 	@./run.sh $@
+
+upgrade-%:
+	@./run.sh $@
