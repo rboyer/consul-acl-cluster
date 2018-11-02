@@ -601,12 +601,14 @@ do_nuke_test_tokens() {
 }
 
 do_sanity() {
+    local pri_port="${1:-8501}"
+    local sec_port="${2:-9501}"
     load_master_token
 
     echo "------------------------------"
     echo "Create token (OLD way) for use in limiting KV to /stuff"
     curl -sL -XPUT \
-        "http://localhost:8501/v1/acl/create" \
+        "http://localhost:${pri_port}/v1/acl/create" \
         -H "X-Consul-Token: ${MASTER_TOKEN}" \
         -d '{
             "Name": "test key for stuff",
@@ -617,14 +619,14 @@ do_sanity() {
     token="$(jq -r .ID < tmp/testkv_token.json)"
     echo "Test token is $token"
 
-    do_sanity_args $token primary 8501
+    do_sanity_args $token primary ${pri_port}
     sleep 2 # wait for replication
-    do_sanity_args $token secondary 9501
+    do_sanity_args $token secondary ${sec_port}
 
     echo "------------------------------"
     echo "cleaning up $token"
     curl -sL -XPUT \
-        "http://localhost:8501/v1/acl/destroy/${token}" \
+        "http://localhost:${pri_port}/v1/acl/destroy/${token}" \
         -H "X-Consul-Token: ${MASTER_TOKEN}" > /dev/null
 }
 do_sanity_args() {
@@ -709,6 +711,7 @@ start-primary    - start all members in the primary datacenter
 testtoken        - mint a simple token for use against KV
 sanity           - mint a simple token for use against KV; use it in both
                    DCs; then destroy it
+sanity2          - like 'sanity' but it executes against client nodes
 nuke-test-tokens - cleanup any stray test-generated tokens from the above
 EOF
 }
@@ -782,7 +785,11 @@ case "${mode}" in
         stat
         ;;
     sanity)
-        do_sanity
+        do_sanity 8501 9501
+        ;;
+    sanity2)
+        # same thing but against clients
+        do_sanity 8504 9504
         ;;
     nuke-test-tokens)
         do_nuke_test_tokens
