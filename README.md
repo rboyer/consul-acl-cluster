@@ -20,8 +20,10 @@ UPGRADES
 upgrade-secondary   - upgrade all secondary DC members to 1.4.0
 upgrade-primary     - upgrade all primary DC members to 1.4.0
 upgrade-primary-one - upgrade just consul-primary-srv1 to 1.4.0
+upgrade-primary-ui  - upgrade just consul-primary-ui to 1.4.0
 flag-upgraded       - drop sufficient marker files such that a call to
                       'refresh' will initialize to 1.4.0 (skipping 1.3.0)
+use-secrets         - will switch to using SecretID if found
 
 TESTING
 

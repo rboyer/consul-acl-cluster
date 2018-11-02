@@ -247,18 +247,26 @@ build() {
     fi
 
     pri_svr1_leg=$pri
+    pri_ui_leg=$pri
     if [[ -n "${UPGRADE_ONLY:-}" ]]; then
-        if [[ "$UPGRADE_ONLY" != "consul-primary-svr1" ]]; then
-            die "unexpected value"
-        fi
-        pri_svr1_leg=false
+        case "$UPGRADE_ONLY" in
+            consul-primary-svr1)
+                pri_svr1_leg=false
+                ;;
+            consul-primary-ui)
+                pri_ui_leg=false
+                ;;
+            *)
+                die "unexpected value: UPGRADE_ONLY=$UPGRADE_ONLY"
+                ;;
+        esac
     fi
 
     terraform apply -auto-approve \
         -var primary_srv1_legacy=$pri_svr1_leg \
         -var primary_srv2_legacy=$pri \
         -var primary_srv3_legacy=$pri \
-        -var primary_ui_legacy=$pri \
+        -var primary_ui_legacy=$pri_ui_leg \
         -var enable_secondary=true \
         -var secondary_srv1_legacy=$sec \
         -var secondary_srv2_legacy=$sec \
@@ -673,6 +681,7 @@ UPGRADES
 upgrade-secondary   - upgrade all secondary DC members to 1.4.0
 upgrade-primary     - upgrade all primary DC members to 1.4.0
 upgrade-primary-one - upgrade just consul-primary-srv1 to 1.4.0
+upgrade-primary-ui  - upgrade just consul-primary-ui to 1.4.0
 flag-upgraded       - drop sufficient marker files such that a call to
                       'refresh' will initialize to 1.4.0 (skipping 1.3.0)
 use-secrets         - will switch to using SecretID if found
@@ -710,6 +719,10 @@ case "${mode}" in
     upgrade-secondary)
         touch tmp/.secondary.upgraded
         SECONDARY_NEW=1
+        build
+        ;;
+    upgrade-primary-ui)
+        UPGRADE_ONLY=consul-primary-ui
         build
         ;;
     upgrade-primary-one)
