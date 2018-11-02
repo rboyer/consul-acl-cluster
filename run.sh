@@ -706,13 +706,14 @@ use-secrets         - will switch to using SecretID if found
 
 TESTING
 
-stop-primary     - stop all members in the primary datacenter
-start-primary    - start all members in the primary datacenter
-testtoken        - mint a simple token for use against KV
-sanity           - mint a simple token for use against KV; use it in both
-                   DCs; then destroy it
-sanity2          - like 'sanity' but it executes against client nodes
-nuke-test-tokens - cleanup any stray test-generated tokens from the above
+stop-primary      - stop all server members in the primary datacenter
+start-primary     - start all server members in the primary datacenter
+restart-secondary - restart all server members in secondary datacenter
+testtoken         - mint a simple token for use against KV
+sanity            - mint a simple token for use against KV; use it in both
+                    DCs; then destroy it
+sanity2           - like 'sanity' but it executes against client nodes
+nuke-test-tokens  - cleanup any stray test-generated tokens from the above
 EOF
 }
 
@@ -803,6 +804,9 @@ case "${mode}" in
     start-primary)
         docker start consul-primary-srv{1,2,3}
         ;;
+    restart-secondary)
+        docker restart consul-secondary-srv{1,2,3}
+        ;;
     use-secrets)
         touch tmp/.ids.upgraded
         USE_SECRETS=1
@@ -819,12 +823,16 @@ case "${mode}" in
             -d '{
                 "Name": "test key for stuff",
                 "Type": "client",
-                "Rules": "{\"key\":{\"stuff\":{\"Policy\":\"write\"}}}"
-            }'
+                "Rules": "{\"key\":{\"altstuff\":{\"Policy\":\"write\"}}}"
+            }' > tmp/test_token.json
+        sleep 2
+        token="$(load_idfile test token)"
+        CONSUL_HTTP_TOKEN=${token} CONSUL_HTTP_ADDR=http://localhost:9501 consul kv put altstuff randombits
+        echo "Your token: $token"
+        echo
         echo "Now check in another terminal with:"
-        echo "  CONSUL_HTTP_TOKEN=YOUR_TOKEN"
-        echo "  CONSUL_HTTP_ADDR=http://localhost:9501"
-        echo "watch -n 1 -d 'date; consul kv get stuff'"
+        echo
+        echo "CONSUL_HTTP_TOKEN=${token} CONSUL_HTTP_ADDR=http://localhost:9501 watch -n 1 -d 'date; consul kv get altstuff'"
         echo
         ;;
     *)
