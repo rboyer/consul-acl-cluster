@@ -1,9 +1,11 @@
 variable "legacy_image" {
-  default = "consul:1.3.0"
+  # default = "consul:1.3.0"
+  default = "consul-dev:ent-1.3"
 }
 
 variable "acl_image" {
-  default = "consul-dev:latest"
+  # default = "consul-dev:latest"
+  default = "consul-dev:ent-1.4-b9"
 }
 
 variable "legacy_config" {

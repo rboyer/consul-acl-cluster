@@ -665,14 +665,17 @@ do_sanity() {
     token="$(jq -r .ID < tmp/testkv_token.json)"
     echo "Test token is $token"
 
+    set +e
     do_sanity_args $token primary ${pri_port}
     sleep 2 # wait for replication
     do_sanity_args $token secondary ${sec_port}
+    set -e
 
     echo "------------------------------"
     echo "cleaning up $token"
     curl -sL -XPUT \
         "http://localhost:${pri_port}/v1/acl/destroy/${token}" \
+        --retry 10 \
         -H "X-Consul-Token: ${MASTER_TOKEN}" > /dev/null
 }
 do_sanity_args() {
@@ -867,7 +870,7 @@ case "${mode}" in
         curl -sL -XPUT http://localhost:8501/v1/acl/create \
             -H "X-Consul-Token: $(< tmp/master_token.json jq -r .ID)" \
             -d '{
-                "Name": "test key for stuff",
+                "Name": "special test token",
                 "Type": "client",
                 "Rules": "{\"key\":{\"altstuff\":{\"Policy\":\"write\"}}}"
             }' > tmp/test_token.json
