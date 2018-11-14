@@ -219,6 +219,19 @@ EOF
 }
 EOF
 
+    if [[ -n "${ACL_DO_NOT_ENFORCE_VERSION_8}" ]]; then
+        cat > "${old_dir}/acl-v8.json" << EOF
+{
+  "acl_enforce_version_8": false
+}
+EOF
+        cp -f "${old_dir}/acl-v8.json" "${new_dir}/acl-v8.json"
+    else
+        rm -f "${old_dir}/acl-v8.json"
+        rm -f "${new_dir}/acl-v8.json"
+        :
+    fi
+
     # drop in for agent auth
     if [[ -n "${AGENT_TOKEN}" ]]; then
         cat > "${old_dir}/acl-agent.json" << EOF
@@ -705,6 +718,182 @@ do_sanity_args() {
     consul_cmd "$token" $port kv delete -recurse stuff
 }
 
+do_pokev8() {
+    load_master_token
+
+    # the endpoints here are all consul-primary-srv1 (:8501)
+
+    echo "================================"
+    echo "list members; should see all..."
+    if CONSUL_HTTP_ADDR=http://localhost:8501 consul members; then
+        :
+    else
+        echo "...failed completely"
+    fi
+    # filter acl when querying the catalog
+    #     agent/acl.go:	if !a.config.ACLEnforceVersion8 {
+    #     agent/consul/acl.go:	filt := newACLFilter(acl, s.logger, s.config.ACLEnforceVersion8)
+
+    echo "================================"
+    echo "register catalog node with service should fail..."
+    out="$(curl -sL -XPUT 'http://localhost:8501/v1/catalog/register' \
+        -d'{
+"Node" : "fake-node",
+"Address" : "9.9.9.9",
+"Service" : {
+    "Service" : "fake-service",
+    "Address" : "9.9.9.9",
+    "Port" : 9999
+} }')"
+    echo "...worked? $out"
+    # node catalog register
+    #     agent/consul/catalog_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "register catalog node with NO services should work..."
+    out="$(curl -sL -XPUT 'http://localhost:8501/v1/catalog/register' \
+        -d'{
+"Node" : "fake-node",
+"Address" : "9.9.9.9"
+}')"
+    echo "...worked? $out"
+    # node catalog register
+    #     agent/consul/catalog_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "deregister catalog node with service should work..."
+
+    out="$(curl -sL -XPUT 'http://localhost:8501/v1/catalog/deregister' \
+        -d'{
+"Node" : "fake-node",
+"Address" : "9.9.9.9",
+"ServiceID" : "fake-service"
+}')"
+    echo "...worked? $out"
+    # node catalog deregister
+    #     agent/consul/catalog_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "deregister catalog node with NO services should work..."
+
+    out="$(curl -sL -XPUT 'http://localhost:8501/v1/catalog/deregister' \
+        -d'{
+"Node" : "fake-node",
+"Address" : "9.9.9.9"
+}')"
+    echo "...worked? $out"
+    # node catalog deregister
+    #     agent/consul/catalog_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+
+
+    echo "================================"
+    echo "creating a session should succeed..."
+    set +e
+    id="$(curl -sL -XPUT http://localhost:8501/v1/session/create \
+        -d '{ "Behavior":"delete", "TTL":"1m" }' | jq -r .ID)"
+    set -e
+    echo "...ID is ${id:-FAILED}"
+    # session create
+    #     agent/consul/session_endpoint.go:	if rule != nil && s.srv.config.ACLEnforceVersion8 {
+
+    if [[ -z "${id}" ]]; then
+        # ok so it legit didn't work, so use a master token to make this
+        # instead so we can test RENEW and DELETE
+        id="$(curl -sL -XPUT http://localhost:8501/v1/session/create \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d '{ "Behavior":"delete", "TTL":"1m" }' | jq -r .ID)"
+        echo "...ID (created with master token) is ${id}"
+        if [[ -z "$id" ]]; then
+            die "session creation failed with master token wtf"
+        fi
+    fi
+
+    echo "================================"
+    echo "renewing a session should succeed..."
+    set +e
+    ttl="$(curl -sL -XPUT http://localhost:8501/v1/session/renew/$id \
+        -d '{ "Behavior":"delete", "TTL":"1m" }' | jq -r .[].TTL)"
+    set -e
+    echo "...renewed with TTL response of ${ttl}"
+    # session renew
+    #     agent/consul/session_endpoint.go:	if rule != nil && s.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "create anonymous prepared query..."
+    set +e
+    pqid="$(curl -sL -XPOST http:/localhost:8501/v1/query \
+        -d '{ "Service": { "Service": "consul" } }' | jq -r .ID)"
+    set -e
+    echo "...PQID is ${pqid:-FAILED}"
+    # create prepared query
+    #     agent/consul/prepared_query_endpoint.go:		if err := parseQuery(args.Query, p.srv.config.ACLEnforceVersion8); err != nil {
+
+    if [[ -z "${pqid}" ]]; then
+        # ok so it legit didn't work, so use a master token to make this
+        # instead so we can test DELETE
+        #
+        # need to tie to a session as per docs if we definitely want it to
+        # exist for further tests below
+        pqid="$(curl -sL -XPOST http:/localhost:8501/v1/query \
+            -H "X-Consul-Token: ${MASTER_TOKEN}" \
+            -d "{
+\"Session\": \"${id}\",
+\"Service\": {
+    \"Service\" : \"consul\"
+}
+}" | jq -r .ID)"
+        echo "...PQID (created with master token) is ${pqid}"
+        if [[ -z "$pqid" ]]; then
+            die "prepared queyr creation failed with master token wtf"
+        fi
+    fi
+
+    echo "================================"
+    echo "update anonymous prepared query..."
+    out="$(curl -sL -XPUT http:/localhost:8501/v1/query/$pqid \
+        -d '{ "Service": { "Service": "consul2" } }')"
+    echo "...did it work? ${out:-WORKED}"
+    # update prepared query
+    #     agent/consul/prepared_query_endpoint.go:		if err := parseQuery(args.Query, p.srv.config.ACLEnforceVersion8); err != nil {
+
+    echo "================================"
+    echo "destroying a session should succeed..."
+    set +e
+    ok="$(curl -sL -XPUT http://localhost:8501/v1/session/destroy/$id \
+        -d '{ "Behavior":"delete", "TTL":"1m" }')"
+    set -e
+    echo "...did it work? $ok"
+    # session destroy
+    #     agent/consul/session_endpoint.go:	if rule != nil && s.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "update coordinates..."
+    out="$(curl -sL -XPUT http:/localhost:8501/v1/coordinate/update \
+        -d '{
+"Node": "agent-one",
+"Segment": "",
+"Coord": {
+    "Adjustment": 0,
+    "Error": 1.5,
+    "Height": 0,
+    "Vec": [0, 0, 0, 0, 0, 0, 0, 0]
+}
+}')"
+    echo "...did it work? ${out:-WORKED}"
+    # coordinate update
+    #     agent/consul/coordinate_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+
+    echo "================================"
+    echo "read node coordinates..."
+    set +e
+    out="$(curl -sL http://localhost:8501/v1/coordinate/node/consul-primary-srv1 | \
+        jq -r '.[].Node' 2>/dev/null)"
+    set -e
+    echo "...worked if this says consul-primary-srv1: [$out]"
+    # coordinate lookup for node
+    #     agent/consul/coordinate_endpoint.go:	if rule != nil && c.srv.config.ACLEnforceVersion8 {
+}
+
 consul_cmd() {
     if [[ "$#" -lt 3 ]]; then
         die "wrong nargs: $@"
@@ -726,6 +915,10 @@ fi
 USE_NEW_AGENTAPI=""
 if [[ -f "tmp/.agentapi.upgraded" ]]; then
     USE_NEW_AGENTAPI=1
+fi
+ACL_DO_NOT_ENFORCE_VERSION_8=""
+if [[ -f "tmp/.disable.acl.v8" ]]; then
+    ACL_DO_NOT_ENFORCE_VERSION_8=1
 fi
 
 show_usage() {
@@ -761,7 +954,11 @@ restart-secondary - restart all server members in secondary datacenter
 testtoken         - mint a simple token for use against KV
 sanity            - mint a simple token for use against KV; use it in both
                     DCs; then destroy it
-sanity2           - like 'sanity' but it executes against client nodes
+clientsanity      - like 'sanity' but it executes against client nodes
+flag-v8-enabled   - mark that acl_enforce_version_8 should be set to true
+flag-v8-disabled  - mark that acl_enforce_version_8 should be set to false
+pokev8            - poke api endpoints without an ACL token where
+                    acl_enforce_version_8=false should NOT mask behaviors
 nuke-test-tokens  - cleanup any stray test-generated tokens from the above
 EOF
 }
@@ -785,6 +982,18 @@ case "${mode}" in
             UPGRADED_HOSTS[$host]=1
         done
         write_upgraded
+        ;;
+    flag-v8-enabled)
+        rm -f tmp/.disable.acl.v8
+        ACL_DO_NOT_ENFORCE_VERSION_8=""
+        genconfig
+        restart
+        ;;
+    flag-v8-disabled)
+        touch tmp/.disable.acl.v8
+        ACL_DO_NOT_ENFORCE_VERSION_8=1
+        genconfig
+        restart
         ;;
     upgrade-secondary)
         for host in "${sec_sorted[@]}"; do
@@ -837,9 +1046,12 @@ case "${mode}" in
     sanity)
         do_sanity 8501 9501
         ;;
-    sanity2)
+    clientsanity)
         # same thing but against clients
         do_sanity 8504 9504
+        ;;
+    pokev8)
+        do_pokev8
         ;;
     nuke-test-tokens)
         do_nuke_test_tokens
